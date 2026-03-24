@@ -19,44 +19,95 @@ class Graph_Linear(nn.Module):
 
 
 class Graph_Tensor(nn.Module):
+    """Bilinear tensor fusion module that combines market (numerical) and news (textual
+    sentiment) features for each stock at each time step.
+
+    Fusion mechanism
+    ----------------
+    Given projected sentiment vector **n** (shape d_hidden) and projected market vector
+    **m** (shape d_hidden) for a single stock at a single time step, the output is:
+
+        output = tanh( n^T · T · m  +  [n; m] · W  +  b )
+
+    where:
+    - ``seq_transformation_news``  – 1-D convolution that maps the raw d_news-dim
+      sentiment indicator vector to the shared d_hidden-dim space.
+    - ``seq_transformation_markets`` – 1-D convolution that maps the raw d_market-dim
+      price/volume feature vector to the same d_hidden-dim space.
+    - ``tensorGraph`` (shape num_stock × d_hidden × d_hidden × d_hidden) – per-stock
+      learnable weight tensor implementing the bilinear interaction between the two
+      modalities (captures multiplicative cross-modal dependencies).
+    - ``W`` (shape num_stock × 2*d_hidden × d_hidden) – per-stock linear projection
+      of the concatenated [news; market] vector.
+    - ``b`` – per-stock bias.
+
+    The bilinear term ``n^T · T · m`` is the key ingredient: it lets the model learn
+    *which sentiment dimensions interact with which market dimensions* and to what
+    degree, on a per-stock basis.
+    """
+
     def __init__(self, num_stock, d_hidden, d_market, d_news, bias=True):
         super(Graph_Tensor, self).__init__()
         self.num_stock = num_stock
         self.d_hidden = d_hidden
         self.d_market = d_market
         self.d_news = d_news
+        # Projects raw sentiment features (d_news-dim) to shared hidden space (d_hidden-dim)
         self.seq_transformation_news = nn.Conv1d(d_news, d_hidden, kernel_size=1, stride=1, bias=False)
+        # Projects raw market features (d_market-dim) to shared hidden space (d_hidden-dim)
         self.seq_transformation_markets = nn.Conv1d(d_market, d_hidden, kernel_size=1, stride=1, bias=False)
+        # Per-stock bilinear tensor: captures multiplicative interactions between
+        # the projected sentiment vector and the projected market vector
         self.tensorGraph = nn.Parameter(torch.zeros(num_stock, d_hidden, d_hidden, d_hidden))
+        # Per-stock linear weight for the concatenated [news; market] representation
         self.W = nn.Parameter(torch.zeros(num_stock, 2 * d_hidden, d_hidden))
         self.b = nn.Parameter(torch.zeros(num_stock, d_hidden))
         self.reset_parameters()
+
     def reset_parameters(self):
         reset_parameters(self.named_parameters)
+
     def forward(self, market, news):
+        """Fuse market and sentiment data via bilinear tensor + linear combination.
+
+        Args:
+            market: Tensor of shape (T, num_stocks, d_market) – numerical market features.
+            news:   Tensor of shape (T, num_stocks, d_news)   – textual sentiment features.
+
+        Returns:
+            output: Tensor of shape (T, num_stocks, d_hidden) – fused representation.
+        """
         t, num_stocks = news.size()[0], news.size()[1]
 
+        # --- Step 1: project sentiment features into shared d_hidden-dim space ---
+        # reshape to (num_stocks*T, d_news), apply Conv1d, restore to (T, num_stocks, d_hidden)
         news_transformed = news.reshape(-1, self.d_news)
         news_transformed = torch.transpose(news_transformed, 0, 1).unsqueeze(0)
         news_transformed = self.seq_transformation_news(news_transformed)
         news_transformed = news_transformed.squeeze().transpose(0, 1)
         news_transformed = news_transformed.reshape(t, num_stocks, self.d_hidden)
 
+        # --- Step 2: project market features into the same d_hidden-dim space ---
         market_transformed = market.reshape(-1, self.d_market)
         market_transformed = torch.transpose(market_transformed, 0, 1).unsqueeze(0)
         market_transformed = self.seq_transformation_markets(market_transformed)
         market_transformed = market_transformed.squeeze().transpose(0, 1)
         market_transformed = market_transformed.reshape(t, num_stocks, self.d_hidden)
 
+        # --- Step 3: bilinear tensor interaction  n^T · T · m ---
+        # Captures multiplicative cross-modal dependencies between sentiment and market
         x_news_tensor = news_transformed.unsqueeze(2)
         x_news_tensor = x_news_tensor.unsqueeze(2)
         x_market_tensor = market_transformed.unsqueeze(-1)
         temp_tensor = x_news_tensor.matmul(self.tensorGraph).squeeze()
         temp_tensor = temp_tensor.matmul(x_market_tensor).squeeze()
+
+        # --- Step 4: linear term on concatenated [news; market] vector ---
         x_linear = torch.cat((news_transformed, market_transformed), axis=-1)
         temp_linear = torch.bmm(x_linear.transpose(0, 1), self.W)
         temp_linear = temp_linear.transpose(0, 1)
 
+        # --- Step 5: combine tensor and linear terms, apply tanh ---
         output = torch.tanh(temp_tensor + temp_linear + self.b)
         return output
 
