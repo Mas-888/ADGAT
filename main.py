@@ -55,12 +55,18 @@ def load_dataset(DEVICE):
         markets = pickle.load(handle)
     with open('./data/y_.pkl', 'rb') as handle:
         y_load = pickle.load(handle)
+    # x_textual.pkl contains pre-computed Loughran-McDonald sentiment scores
+    # derived from Reuters/Bloomberg financial news for each stock and each trading day.
+    # Shape: (num_days, num_stocks, d_news) where d_news is the number of sentiment
+    # indicator dimensions (e.g. positive, negative, uncertainty word counts / ratios).
     with open('./data/x_textual.pkl', 'rb') as handle:
         stock_sentiments = pickle.load(handle)
 
     markets = markets.astype(np.float64)
+    # x: numerical market features tensor (price/volume indicators)
     x = torch.tensor(markets, device=DEVICE)
     x.to(torch.double)
+    # x_sentiment: textual sentiment features tensor – fed into the model alongside x
     x_sentiment = torch.tensor(stock_sentiments, device=DEVICE)
     x_sentiment.to(torch.double)
     if args.relation != "None":
